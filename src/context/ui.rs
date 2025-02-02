@@ -358,42 +358,30 @@ impl egui_tiles::Behavior<Pane> for TileTreeContext {
                         })
                         .collect();
 
-                    // Get current camera name for display with scene
-                    let current_camera_text = if let Some(cam) = camera_entity {
-                        let camera_name =
+                    egui::ComboBox::from_label("")
+                        .selected_text(if let Some(cam) = camera_entity {
                             if let Some(Name(name)) = get_component::<Name>(context, cam, NAME) {
                                 name.clone()
                             } else {
                                 format!("Camera {}", cam.id)
-                            };
-
-                        let scene_name = if let Some(Parent(parent)) =
-                            get_component::<Parent>(context, cam, PARENT)
-                        {
-                            if let Some(Name(name)) = get_component::<Name>(context, *parent, NAME)
-                            {
-                                format!(" ({})", name)
-                            } else {
-                                format!(" (Scene {})", parent.id)
                             }
                         } else {
-                            " (No Scene)".to_string()
-                        };
-
-                        format!("{}{}", camera_name, scene_name)
-                    } else {
-                        "No Camera".to_string()
-                    };
-
-                    egui::ComboBox::from_label("")
-                        .selected_text(current_camera_text)
+                            "No Camera".to_string()
+                        })
                         .show_ui(ui, |ui| {
-                            for (camera, label) in &all_cameras {
+                            for (camera, _) in &all_cameras {
+                                let camera_name = if let Some(Name(name)) =
+                                    get_component::<Name>(context, *camera, NAME)
+                                {
+                                    name.clone()
+                                } else {
+                                    format!("Camera {}", camera.id)
+                                };
+
                                 if ui
-                                    .selectable_label(Some(*camera) == camera_entity, label)
+                                    .selectable_label(Some(*camera) == camera_entity, camera_name)
                                     .clicked()
                                 {
-                                    // Create new PaneKind outside the closure
                                     let new_kind = PaneKind::Scene {
                                         scene_entity,
                                         camera_entity: Some(*camera),
