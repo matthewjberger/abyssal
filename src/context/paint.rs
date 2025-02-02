@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::context::{Context, EntityId};
 use nalgebra_glm::{Vec2, Vec3, Vec4};
 

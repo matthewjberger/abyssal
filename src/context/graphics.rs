@@ -14,6 +14,18 @@ use crate::context::{
     Context,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RenderMode {
+    Edit,
+    Run,
+}
+
+impl Default for RenderMode {
+    fn default() -> Self {
+        Self::Edit
+    }
+}
+
 /// A resource for graphics state
 #[derive(Default)]
 pub struct Graphics {
@@ -22,6 +34,9 @@ pub struct Graphics {
 
     /// The size of the display viewport
     pub viewport_size: (u32, u32),
+
+    /// The current render mode
+    pub render_mode: RenderMode,
 }
 
 /// Contains all resources required for rendering
@@ -67,6 +82,125 @@ pub fn render_frame_system(context: &mut crate::context::Context) {
         return;
     }
 
+    match context.resources.graphics.render_mode {
+        RenderMode::Edit => render_edit_mode(context),
+        RenderMode::Run => render_run_mode(context),
+    }
+}
+
+fn render_run_mode(context: &mut crate::context::Context) {
+    // Ensure we have at least one render target
+    ensure_viewports(context, 1);
+
+    // Get the active camera matrices
+    let Some(camera_matrices) = crate::context::camera::query_active_camera_matrices(context)
+    else {
+        return;
+    };
+
+    let scene_data = collect_scene_data(context);
+
+    let Some(renderer) = context.resources.graphics.renderer.as_mut() else {
+        return;
+    };
+
+    let mut encoder = renderer
+        .gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Run Mode Render Encoder"),
+        });
+
+    let Ok(surface_texture) = renderer.gpu.surface.get_current_texture() else {
+        return;
+    };
+
+    let surface_texture_view = surface_texture
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
+
+    let target = &mut renderer.targets[0];
+
+    // Update uniforms for the scene
+    let matrices = CameraMatrices {
+        view: camera_matrices.view,
+        projection: camera_matrices.projection,
+        camera_position: camera_matrices.camera_position,
+    };
+
+    // Update rendering uniforms
+    grid::update_grid(&matrices, &renderer.gpu.queue, &target.grid);
+    sky::update_sky(&matrices, &renderer.gpu.queue, &target.sky);
+
+    // Get all lines and quads from the scene
+    if let Some((scene_lines, scene_quads)) = scene_data {
+        lines::update_lines_uniform(
+            &matrices,
+            &renderer.gpu.device,
+            &renderer.gpu.queue,
+            &mut target.lines,
+            scene_lines,
+        );
+        quads::update_quads_uniform(
+            &matrices,
+            &renderer.gpu.device,
+            &renderer.gpu.queue,
+            &mut target.quads,
+            scene_quads,
+        );
+    }
+
+    // Render to the full screen
+    let viewport_size = context.resources.graphics.viewport_size;
+    let viewport = egui::Rect::from_min_size(
+        egui::pos2(0.0, 0.0),
+        egui::vec2(viewport_size.0 as f32, viewport_size.1 as f32),
+    );
+
+    {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Run Mode Render Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &surface_texture_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &renderer.ui_depth_texture_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        render_pass.set_viewport(
+            viewport.min.x,
+            viewport.min.y,
+            viewport.width(),
+            viewport.height(),
+            0.0,
+            1.0,
+        );
+
+        // Render the scene
+        sky::render_sky(&mut render_pass, &target.sky);
+        lines::render_lines(&mut render_pass, &target.lines);
+        quads::render_quads(&mut render_pass, &target.quads);
+        grid::render_grid(&mut render_pass, &target.grid);
+    }
+
+    renderer.gpu.queue.submit(std::iter::once(encoder.finish()));
+    surface_texture.present();
+}
+
+fn render_edit_mode(context: &mut crate::context::Context) {
     update_pane_uniforms_system(context);
 
     let mut viewports = context
@@ -81,8 +215,8 @@ pub fn render_frame_system(context: &mut crate::context::Context) {
     for (_, viewport) in viewports.iter_mut() {
         let scale_factor = context.resources.window.scale_factor;
         *viewport = egui::Rect {
-            min: egui::pos2(viewport.min.x as f32, viewport.min.y as f32) * scale_factor as f32,
-            max: egui::pos2(viewport.max.x as f32, viewport.max.y as f32) * scale_factor as f32,
+            min: egui::pos2(viewport.min.x, viewport.min.y) * scale_factor as f32,
+            max: egui::pos2(viewport.max.x, viewport.max.y) * scale_factor as f32,
         };
     }
 
@@ -750,4 +884,110 @@ pub fn query_viewport_aspect_ratio(context: &crate::context::Context) -> Option<
     let surface_config = &renderer.gpu.surface_config;
     let aspect_ratio = surface_config.width as f32 / surface_config.height.max(1) as f32;
     Some(aspect_ratio)
+}
+
+// Update the render_frame_system to handle different render modes
+fn collect_scene_data(
+    context: &crate::context::Context,
+) -> Option<(Vec<LineInstance>, Vec<QuadInstance>)> {
+    use crate::context::*;
+
+    // Find the scene this camera belongs to
+    let camera_entity = context.resources.active_camera_entity?;
+    let mut current = camera_entity;
+    let mut found_scene = None;
+
+    // Keep traversing up until we find a root node
+    while let Some(Parent(parent)) = get_component::<Parent>(context, current, PARENT) {
+        current = *parent;
+        // If current is a root node (no parent), this is our scene
+        if get_component::<Parent>(context, current, PARENT).is_none() {
+            found_scene = Some(current);
+            break;
+        }
+    }
+
+    let scene_entity = found_scene?;
+
+    // Get all entities in this scene's hierarchy
+    let scene_entities = query_entities(context, LOCAL_TRANSFORM)
+        .into_iter()
+        .filter(|entity| is_descendant_of(context, *entity, scene_entity))
+        .collect::<Vec<_>>();
+
+    // Process lines for this scene's entities
+    let scene_lines: Vec<_> = scene_entities
+        .iter()
+        .filter_map(|entity| {
+            let Lines(lines) = get_component::<Lines>(context, *entity, LINES)?;
+            let global_transform =
+                get_component::<GlobalTransform>(context, *entity, GLOBAL_TRANSFORM)?;
+
+            Some(
+                lines
+                    .iter()
+                    .map(|line| {
+                        // Transform line to world space
+                        let start_world = (global_transform.0
+                            * nalgebra_glm::vec4(line.start.x, line.start.y, line.start.z, 1.0))
+                        .xyz();
+                        let end_world = (global_transform.0
+                            * nalgebra_glm::vec4(line.end.x, line.end.y, line.end.z, 1.0))
+                        .xyz();
+
+                        LineInstance {
+                            start: nalgebra_glm::vec4(
+                                start_world.x,
+                                start_world.y,
+                                start_world.z,
+                                1.0,
+                            ),
+                            end: nalgebra_glm::vec4(end_world.x, end_world.y, end_world.z, 1.0),
+                            color: line.color,
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .flatten()
+        .collect();
+
+    // Process quads for this scene's entities
+    let scene_quads: Vec<_> = scene_entities
+        .iter()
+        .filter_map(|entity| {
+            let Quads(quads) = get_component::<Quads>(context, *entity, QUADS)?;
+            let global_transform =
+                get_component::<GlobalTransform>(context, *entity, GLOBAL_TRANSFORM)?;
+
+            Some(
+                quads
+                    .iter()
+                    .map(|quad| {
+                        let scale = nalgebra_glm::scaling(&nalgebra_glm::vec3(
+                            quad.size.x,
+                            quad.size.y,
+                            1.0,
+                        ));
+                        let offset = nalgebra_glm::translation(&nalgebra_glm::vec3(
+                            quad.offset.x,
+                            quad.offset.y,
+                            quad.offset.z,
+                        ));
+                        let final_transform = global_transform.0 * offset * scale;
+                        QuadInstance {
+                            model_matrix_0: final_transform.column(0).into(),
+                            model_matrix_1: final_transform.column(1).into(),
+                            model_matrix_2: final_transform.column(2).into(),
+                            model_matrix_3: final_transform.column(3).into(),
+                            color: quad.color,
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .flatten()
+        .collect();
+
+    Some((scene_lines, scene_quads))
 }

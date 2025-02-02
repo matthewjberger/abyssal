@@ -1,6 +1,7 @@
 use crate::context::{
     camera::{Camera, OrthographicCamera, PerspectiveCamera, Projection},
     get_component, get_component_mut,
+    graphics::RenderMode,
     paint::{Line, Lines, Quad, Quads},
     query_entities, spawn_entities,
     transform::LocalTransform,
@@ -281,31 +282,29 @@ impl egui_tiles::Behavior<Pane> for TileTreeContext {
                             .is_empty();
 
                         let is_scene = matches!(pane.kind, PaneKind::Scene { .. });
-                        if has_scenes {
-                            if ui.selectable_label(is_scene, "Scene").clicked() && !is_scene {
-                                // When switching to Scene, use existing root node if available
-                                if let Some(existing_scene) =
-                                    query_entities(context, LOCAL_TRANSFORM)
-                                        .into_iter()
-                                        .find(|e| {
-                                            get_component::<Parent>(context, *e, PARENT).is_none()
-                                        })
-                                {
-                                    // Get the camera for this scene
-                                    let camera = query_children(context, existing_scene)
-                                        .into_iter()
-                                        .find(|e| {
-                                            get_component::<Camera>(context, *e, CAMERA).is_some()
-                                        });
+                        if has_scenes
+                            && ui.selectable_label(is_scene, "Scene").clicked()
+                            && !is_scene
+                        {
+                            // When switching to Scene, use existing root node if available
+                            if let Some(existing_scene) = query_entities(context, LOCAL_TRANSFORM)
+                                .into_iter()
+                                .find(|e| get_component::<Parent>(context, *e, PARENT).is_none())
+                            {
+                                // Get the camera for this scene
+                                let camera = query_children(context, existing_scene)
+                                    .into_iter()
+                                    .find(|e| {
+                                        get_component::<Camera>(context, *e, CAMERA).is_some()
+                                    });
 
-                                    pane.kind = PaneKind::Scene {
-                                        scene_entity: existing_scene,
-                                        camera_entity: camera,
-                                    };
-                                } else {
-                                    // Create new root node if none exists
-                                    pane.kind = create_scene_pane(context).kind;
-                                }
+                                pane.kind = PaneKind::Scene {
+                                    scene_entity: existing_scene,
+                                    camera_entity: camera,
+                                };
+                            } else {
+                                // Create new root node if none exists
+                                pane.kind = create_scene_pane(context).kind;
                             }
                         }
 
@@ -487,6 +486,13 @@ pub fn receive_window_event(
     context: &mut crate::context::Context,
     event: &winit::event::WindowEvent,
 ) {
+    if matches!(
+        context.resources.graphics.render_mode,
+        super::graphics::RenderMode::Run
+    ) {
+        return;
+    }
+
     let Some(gui_state) = &mut context.resources.user_interface.state else {
         return;
     };
@@ -1096,6 +1102,18 @@ fn top_panel_ui(context: &mut crate::context::Context, ui: &egui::Context) {
         egui::menu::bar(ui, |ui| {
             egui::global_theme_preference_switch(ui);
             ui.separator();
+
+            // Add render mode toggle
+            let is_edit_mode = context.resources.graphics.render_mode == RenderMode::Edit;
+            if ui.selectable_label(is_edit_mode, "🔧 Edit").clicked() {
+                context.resources.graphics.render_mode = RenderMode::Edit;
+            }
+            if ui.selectable_label(!is_edit_mode, "▶ Run").clicked() {
+                context.resources.graphics.render_mode = RenderMode::Run;
+            }
+
+            ui.separator();
+
             ui.checkbox(
                 &mut context.resources.user_interface.show_left_panel,
                 "Tree",

@@ -1,4 +1,4 @@
-use crate::context::Context;
+use crate::context::{graphics::RenderMode, Context};
 
 #[derive(Default)]
 pub struct Input {
@@ -42,8 +42,11 @@ pub struct Mouse {
 
 pub fn escape_key_exit_system(context: &mut crate::context::Context) {
     let keyboard = &context.resources.input.keyboard;
-    if keyboard.is_key_pressed(winit::keyboard::KeyCode::Escape) {
-        context.resources.window.should_exit = true;
+
+    if keyboard.is_key_pressed(winit::keyboard::KeyCode::Escape)
+        && matches!(context.resources.graphics.render_mode, RenderMode::Run)
+    {
+        context.resources.graphics.render_mode = RenderMode::Edit;
     }
 }
 
