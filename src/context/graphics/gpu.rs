@@ -57,7 +57,7 @@ pub async fn create_gpu_async(
         format: surface_format,
         width,
         height,
-        present_mode: surface_capabilities.present_modes[0],
+        present_mode: wgpu::PresentMode::Immediate,
         alpha_mode: surface_capabilities.alpha_modes[0],
         view_formats: vec![],
         desired_maximum_frame_latency: 1,
